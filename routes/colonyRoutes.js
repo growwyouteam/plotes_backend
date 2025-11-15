@@ -1,0 +1,209 @@
+const express = require('express');
+const { body, validationResult } = require('express-validator');
+const Colony = require('../models/Colony');
+const Plot = require('../models/Plot');
+const { protect, authorize } = require('../middleware/auth');
+
+const router = express.Router();
+
+// @desc    Get all colonies (Public for user app)
+// @route   GET /api/v1/colonies
+// @access  Public
+router.get('/', protect, async (req, res) => {
+  try {
+    const { page = 1, limit = 10, city, search, status } = req.query;
+    
+    const query = {};
+    
+    if (city) query.city = city;
+    if (status) query.status = status;
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } },
+        { address: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const colonies = await Colony.find(query)
+      .populate('city', 'name state')
+      .populate('createdBy', 'name email')
+      .select('+pricePerSqFt') // Ensure pricePerSqFt is included
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    const total = await Colony.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: {
+        colonies: colonies,
+        pagination: {
+          current: parseInt(page),
+          pages: Math.ceil(total / limit),
+          total: total
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get colonies error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @desc    Get colony by ID (Public for user app)
+// @route   GET /api/v1/colonies/:id
+// @access  Public
+router.get('/:id', protect, async (req, res) => {
+  try {
+    const colony = await Colony.findById(req.params.id)
+      .populate('city', 'name state country')
+      .populate('createdBy', 'name email');
+
+    if (!colony) {
+      return res.status(404).json({
+        success: false,
+        message: 'Colony not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        colony: colony
+      }
+    });
+  } catch (error) {
+    console.error('Get colony error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Protected routes
+router.use(protect);
+
+// @desc    Create colony
+// @route   POST /api/v1/colonies
+// @access  Private (Admin, Manager)
+router.post('/', authorize('colony_create', 'all'), [
+  body('name').notEmpty().withMessage('Colony name is required'),
+  body('address').notEmpty().withMessage('Address is required'),
+  body('totalArea').optional().isNumeric().withMessage('Total area must be a number'),
+  body('pricePerSqFt').optional().isNumeric().withMessage('Price per sq ft must be a number'),
+  body('coordinates.latitude').optional().isNumeric().withMessage('Latitude must be numeric'),
+  body('coordinates.longitude').optional().isNumeric().withMessage('Longitude must be numeric')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation errors',
+        errors: errors.array()
+      });
+    }
+
+    const colonyData = {
+      ...req.body,
+      createdBy: req.user._id
+    };
+
+    const colony = await Colony.create(colonyData);
+    await colony.populate('city', 'name state');
+
+    res.status(201).json({
+      success: true,
+      message: 'Colony created successfully',
+      data: {
+        colony: colony
+      }
+    });
+  } catch (error) {
+    console.error('Create colony error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @desc    Update colony
+// @route   PUT /api/v1/colonies/:id
+// @access  Private (Admin, Manager)
+router.put('/:id', authorize('colony_update', 'all'), async (req, res) => {
+  try {
+    const colony = await Colony.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    ).populate('city', 'name state');
+
+    if (!colony) {
+      return res.status(404).json({
+        success: false,
+        message: 'Colony not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Colony updated successfully',
+      data: {
+        colony: colony
+      }
+    });
+  } catch (error) {
+    console.error('Update colony error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @desc    Delete colony
+// @route   DELETE /api/v1/colonies/:id
+// @access  Private (Admin)
+router.delete('/:id', authorize('colony_delete', 'all'), async (req, res) => {
+  try {
+    const colony = await Colony.findById(req.params.id);
+
+    if (!colony) {
+      return res.status(404).json({
+        success: false,
+        message: 'Colony not found'
+      });
+    }
+
+    // Check if colony has plots
+    const plotCount = await Plot.countDocuments({ colony: req.params.id });
+    if (plotCount > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete colony with existing plots'
+      });
+    }
+
+    await colony.deleteOne();
+
+    res.json({
+      success: true,
+      message: 'Colony deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete colony error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+module.exports = router;
